@@ -1,0 +1,7 @@
+*.index
+*.pkl
+*.pyc
+*.json
+*.jsonl
+*.gguf
+*.pdf
