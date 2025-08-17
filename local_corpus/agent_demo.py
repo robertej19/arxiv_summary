@@ -12,6 +12,16 @@ INSTRUCTIONS = (
     "If evidence is thin or conflicting, say so and search again."
 )
 
+
+# agent_demo.py
+import os
+from contextlib import redirect_stdout, redirect_stderr
+
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_PATH = os.path.join(LOG_DIR, "agent_debug.log")
+
+
 def run():
     tools = [LocalSearchTool(), ReaderTool()]
     model_path = os.path.join(os.path.dirname(__file__), "..", "models", "Qwen2.5-7B-Instruct-Q4_K_M.gguf")
@@ -35,8 +45,12 @@ def run():
         planning_interval=3,        # optional: add periodic planning
     )
 
-    q = "Summarize why PPO is more practical than TRPO. Provide at least 2 citations."
-    print(agent.run(q))
+    q = "Compare the different Policy Optimization algorithms, for example PPO, GRPO, etc."
+    with open(LOG_PATH, "a", encoding="utf-8") as _f, redirect_stdout(_f), redirect_stderr(_f):
+        result = agent.run(q)
+
+    # Print the final answer to console (this WON'T be captured into the chat context)
+    print(result)
 
 if __name__ == "__main__":
     run()
