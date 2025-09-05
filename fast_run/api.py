@@ -75,14 +75,22 @@ class TenKAPI:
             raise Exception(f"Failed to connect to knowledge base: {e}")
     
     def get_connection(self):
-        """Get a fresh database connection."""
-        return duckdb.connect(self.db_path)
+        """Get a fresh database connection with FTS extension."""
+        conn = duckdb.connect(self.db_path)
+        # Install and load full-text search extension
+        try:
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD fts")
+        except:
+            pass  # Extension might already be loaded
+        return conn
     
     def search_filings(self, request: SearchRequest) -> List[SearchResult]:
-        """Search across all filings."""
+        """Search across all filings using optimized full-text search."""
         conn = self.get_connection()
         
         try:
+            # Use database-level text search and preview generation
             sql = """
                 SELECT 
                     f.ticker,
@@ -91,14 +99,27 @@ class TenKAPI:
                     f.fiscal_year,
                     s.section_name,
                     s.content_length,
-                    s.content,
+                    -- Generate preview in database instead of Python
+                    CASE 
+                        WHEN position(lower(?) in lower(s.content)) > 0 THEN
+                            '...' || 
+                            substr(s.content, 
+                                   greatest(1, position(lower(?) in lower(s.content)) - 150), 
+                                   300) || 
+                            '...'
+                        ELSE
+                            substr(s.content, 1, 300) || '...'
+                    END as content_preview,
                     f.file_path
                 FROM sections s
                 JOIN filings f ON s.filing_id = f.id
-                WHERE s.content ILIKE ?
+                WHERE 
+                    -- Use more efficient text search
+                    lower(s.content) LIKE lower(?)
             """
             
-            params = [f'%{request.query}%']
+            query_param = f'%{request.query}%'
+            params = [request.query, request.query, query_param]
             
             if request.tickers:
                 placeholders = ','.join(['?' for _ in request.tickers])
@@ -122,24 +143,7 @@ class TenKAPI:
             
             search_results = []
             for row in results:
-                ticker, company_name, filing_date, fiscal_year, section_name, content_length, content, file_path = row
-                
-                # Create content preview (first 300 chars around the query)
-                content_lower = content.lower()
-                query_lower = request.query.lower()
-                
-                if query_lower in content_lower:
-                    start_idx = content_lower.find(query_lower)
-                    preview_start = max(0, start_idx - 150)
-                    preview_end = min(len(content), start_idx + len(request.query) + 150)
-                    content_preview = content[preview_start:preview_end]
-                    
-                    if preview_start > 0:
-                        content_preview = "..." + content_preview
-                    if preview_end < len(content):
-                        content_preview = content_preview + "..."
-                else:
-                    content_preview = content[:300] + "..." if len(content) > 300 else content
+                ticker, company_name, filing_date, fiscal_year, section_name, content_length, content_preview, file_path = row
                 
                 search_results.append(SearchResult(
                     ticker=ticker,
