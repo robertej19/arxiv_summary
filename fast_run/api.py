@@ -7,13 +7,22 @@ Provides REST API endpoints for querying the knowledge base.
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Generator
+import json
 import duckdb
 import logging
 from pathlib import Path
 from datetime import date
 import uvicorn
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import sys
+import os
+
+# Add deep_research_and_rag to path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), 'deep_research_and_rag'))
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +65,22 @@ class KnowledgeBaseStats(BaseModel):
     total_sections: int
     top_companies: Dict[str, int]
     top_sections: Dict[str, int]
+
+class ResearchRequest(BaseModel):
+    question: str = Field(..., description="Research question to analyze")
+    
+class ResearchResponse(BaseModel):
+    question: str
+    answer: str
+    status: str
+    processing_time: Optional[float] = None
+
+class ProgressUpdate(BaseModel):
+    step: str
+    message: str
+    progress: float  # 0.0 to 1.0
+    details: Optional[Dict[str, Any]] = None
+    timestamp: Optional[float] = None
 
 class TenKAPI:
     """API interface for 10-K Knowledge Base."""
@@ -323,6 +348,9 @@ except Exception as e:
     logger.error(f"Failed to initialize API: {e}")
     raise
 
+# Initialize thread pool for research tasks
+executor = ThreadPoolExecutor(max_workers=2)
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -334,7 +362,8 @@ async def root():
             "/company/{ticker}": "Get company overview",
             "/stats": "Get knowledge base statistics",
             "/tickers": "List available tickers",
-            "/sections": "List available sections"
+            "/sections": "List available sections",
+            "/research": "AI-powered research on 10-K filings"
         }
     }
 
@@ -385,6 +414,117 @@ async def get_available_sections():
     except Exception as e:
         logger.error(f"Sections error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/research", response_model=ResearchResponse)
+async def conduct_research(request: ResearchRequest):
+    """Conduct AI-powered research on 10-K filings."""
+    import time
+    start_time = time.time()
+    
+    try:
+        # Import research function
+        sys.path.append(os.path.join(os.path.dirname(__file__), 'deep_research_and_rag'))
+        from tenk_research_agent import conduct_10k_research
+        
+        # Run research in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        answer = await loop.run_in_executor(
+            executor, 
+            conduct_10k_research, 
+            request.question
+        )
+        
+        processing_time = time.time() - start_time
+        
+        return ResearchResponse(
+            question=request.question,
+            answer=answer,
+            status="completed",
+            processing_time=processing_time
+        )
+        
+    except Exception as e:
+        logger.error(f"Research error: {e}")
+        processing_time = time.time() - start_time
+        
+        return ResearchResponse(
+            question=request.question,
+            answer=f"Research failed: {str(e)}",
+            status="error", 
+            processing_time=processing_time
+        )
+
+@app.post("/research/stream")
+async def conduct_research_stream(request: ResearchRequest):
+    """Conduct AI-powered research with streaming progress updates."""
+    
+    def generate_progress() -> Generator[str, None, None]:
+        import time
+        import traceback
+        start_time = time.time()
+        
+        try:
+            # Send initial connection confirmation
+            yield f"data: {json.dumps({'step': 'connected', 'message': 'Connection established', 'progress': 0.0})}\n\n"
+            
+            # Import the streaming research function
+            sys.path.append(os.path.join(os.path.dirname(__file__), 'deep_research_and_rag'))
+            from tenk_research_agent import conduct_10k_research_with_progress, ProgressUpdate
+            
+            logger.info(f"Starting streaming research for question: {request.question[:100]}")
+            
+            # Generator that yields progress updates
+            update_count = 0
+            for progress_update in conduct_10k_research_with_progress(request.question):
+                try:
+                    progress_update.timestamp = time.time() - start_time
+                    update_count += 1
+                    
+                    # Format as Server-Sent Events
+                    data = progress_update.model_dump()
+                    yield f"data: {json.dumps(data)}\n\n"
+                    
+                    logger.debug(f"Sent progress update {update_count}: {progress_update.step}")
+                    
+                    # Check if research is complete
+                    if progress_update.step == "completed":
+                        logger.info(f"Research completed after {update_count} updates")
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"Error in progress update {update_count}: {e}")
+                    continue
+                
+        except ImportError as e:
+            logger.error(f"Import error in streaming: {e}")
+            error_data = {
+                "step": "error",
+                "message": f"Import failed: {str(e)}. Please check if the research agent is properly installed.",
+                "progress": 0.0,
+                "timestamp": time.time() - start_time
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Streaming research error: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            error_data = {
+                "step": "error", 
+                "message": f"Research failed: {str(e)}",
+                "progress": 0.0,
+                "timestamp": time.time() - start_time
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+    
+    return StreamingResponse(
+        generate_progress(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream"
+        }
+    )
 
 # Convenience GET endpoint for simple searches
 @app.get("/search", response_model=List[SearchResult])

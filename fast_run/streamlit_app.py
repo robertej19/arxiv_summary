@@ -93,11 +93,100 @@ class APIClient:
         except requests.exceptions.RequestException as e:
             st.error(f"API Error: {e}")
             return []
+    
+    def conduct_research(self, question: str) -> Dict:
+        """Conduct AI research via API."""
+        try:
+            response = requests.post(
+                f"{self.base_url}/research",
+                json={"question": question},
+                timeout=300  # 5 minutes timeout for research
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Research API Error: {e}")
+            return {"status": "error", "answer": f"Research failed: {e}"}
+    
+    def conduct_research_stream(self, question: str):
+        """Conduct AI research with streaming progress updates."""
+        import json
+        import time
+        
+        try:
+            # Test basic connection first
+            test_response = requests.get(f"{self.base_url}/sections", timeout=5)
+            if test_response.status_code != 200:
+                raise requests.exceptions.ConnectionError("API server not responding")
+            
+            response = requests.post(
+                f"{self.base_url}/research/stream",
+                json={"question": question},
+                stream=True,
+                timeout=300,
+                headers={
+                    "Connection": "keep-alive",
+                    "Cache-Control": "no-cache"
+                }
+            )
+            response.raise_for_status()
+            
+            line_count = 0
+            last_update_time = time.time()
+            
+            for line in response.iter_lines(decode_unicode=True, chunk_size=1):
+                if line and line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])  # Remove "data: " prefix
+                        line_count += 1
+                        last_update_time = time.time()
+                        yield data
+                        
+                        # Break if completed
+                        if data.get("step") == "completed":
+                            break
+                            
+                    except json.JSONDecodeError as e:
+                        continue
+                elif line:
+                    # Handle other SSE events or heartbeats
+                    continue
+                    
+                # Check for timeout
+                if time.time() - last_update_time > 60:  # 60 second timeout
+                    raise requests.exceptions.Timeout("No updates received for 60 seconds")
+            
+            # If we exit the loop without completion, it's an error
+            if line_count == 0:
+                raise requests.exceptions.ConnectionError("No data received from stream")
+                        
+        except requests.exceptions.Timeout as e:
+            yield {
+                "step": "error",
+                "message": f"Request timed out: {e}. Please try again.",
+                "progress": 0.0
+            }
+        except requests.exceptions.ConnectionError as e:
+            yield {
+                "step": "error", 
+                "message": f"Connection error: {e}. Please check if the API server is running.",
+                "progress": 0.0
+            }
+        except requests.exceptions.RequestException as e:
+            yield {
+                "step": "error",
+                "message": f"Research failed: {e}",
+                "progress": 0.0
+            }
 
 # Initialize API client
 @st.cache_resource
-def get_api_client():
+def get_api_client(version="v2"):  # Added version to force cache refresh
     return APIClient()
+
+# Clear cache if needed (for development)
+def clear_api_cache():
+    get_api_client.clear()
 
 # Cache API calls for better performance
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -170,11 +259,13 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox(
         "Choose a page",
-        ["🔍 Search", "📈 Analytics", "🏢 Company Overview", "ℹ️ About"]
+        ["🔍 Search", "🤖 AI Research", "📈 Analytics", "🏢 Company Overview", "ℹ️ About"]
     )
     
     if page == "🔍 Search":
         search_page()
+    elif page == "🤖 AI Research":
+        research_page()
     elif page == "📈 Analytics":
         analytics_page()
     elif page == "🏢 Company Overview":
@@ -312,6 +403,251 @@ def display_search_results(results: List[Dict], query: str):
             
             st.divider()
 
+def research_page():
+    """AI Research interface using the 10-K research agent."""
+    
+    st.header("🤖 AI Research Assistant")
+    st.markdown("### Ask complex questions about companies, industries, and business trends")
+    
+    # Get fresh API client (in case of updates)
+    api_client = get_api_client()
+    
+    # Debug section (can be removed after testing)
+    if st.checkbox("🔧 Debug Mode", value=False):
+        st.write("**API Client Methods:**")
+        methods = [method for method in dir(api_client) if not method.startswith('_')]
+        st.write(methods)
+        
+        has_streaming = hasattr(api_client, 'conduct_research_stream')
+        st.write(f"**Has streaming method:** {has_streaming}")
+        
+        if st.button("Clear Cache"):
+            clear_api_cache()
+            st.experimental_rerun()
+    
+    # Example questions for inspiration
+    with st.expander("💡 Example Research Questions"):
+        st.markdown("""
+        **Technology & Innovation:**
+        - How are major tech companies approaching artificial intelligence?
+        - What cybersecurity risks do companies identify in their filings?
+        
+        **Business Strategy:**
+        - How do companies describe their competitive advantages?
+        - What supply chain challenges are companies facing?
+        
+        **Financial & Risk Analysis:**
+        - How are companies preparing for economic uncertainty?
+        - What regulatory changes are impacting different industries?
+        
+        **ESG & Sustainability:**
+        - How do companies address climate change in their business strategies?
+        - What diversity and inclusion initiatives are companies reporting?
+        """)
+    
+    # Research form
+    with st.form("research_form"):
+        question = st.text_area(
+            "Research Question",
+            placeholder="Enter your research question here...\n\nExample: How are technology companies positioning themselves in the AI market?",
+            height=120,
+            help="Ask a comprehensive question about business trends, strategies, risks, or any topic covered in 10-K filings"
+        )
+        
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            submitted = st.form_submit_button("🚀 Start Research", type="primary", use_container_width=True)
+    
+    # Conduct research
+    if submitted and question:
+        if len(question.strip()) < 10:
+            st.error("Please provide a more detailed research question (at least 10 characters).")
+            return
+            
+        # Show research status with real-time updates
+        status_container = st.container()
+        result_container = st.container()
+        
+        with status_container:
+            st.info("🔬 **Research in Progress**")
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+            details_expander = st.expander("🔍 Research Details", expanded=False)
+            
+        start_time = time.time()
+        final_result = None
+        companies_analyzed = []
+        evidence_count = 0
+        
+        # Stream research progress
+        try:
+            # Ensure we have the streaming method (fallback to fresh instance if not)
+            if not hasattr(api_client, 'conduct_research_stream'):
+                st.warning("🔄 Refreshing API client...")
+                clear_api_cache()
+                api_client = APIClient()  # Create fresh instance
+            
+            # Try streaming, with fallback to regular research
+            streaming_failed = False
+            update_count = 0
+            
+            for update in api_client.conduct_research_stream(question):
+                update_count += 1
+                # Update main progress
+                progress_text.text(update.get("message", "Processing..."))
+                progress = update.get("progress", 0.0)
+                progress_bar.progress(min(progress, 1.0))
+                
+                # Show detailed information
+                details = update.get("details", {})
+                if details:
+                    with details_expander:
+                        if "queries" in details:
+                            st.write("**Generated Search Queries:**")
+                            for i, query in enumerate(details["queries"], 1):
+                                st.write(f"{i}. {query}")
+                        
+                        if "current_query" in details:
+                            st.write(f"**Current Search:** {details['current_query']}")
+                        
+                        if "companies" in details:
+                            companies_analyzed = details["companies"]
+                            st.write(f"**Companies Found:** {', '.join(companies_analyzed[:5])}")
+                            if len(companies_analyzed) > 5:
+                                st.write(f"...and {len(companies_analyzed) - 5} more")
+                        
+                        if "evidence_count" in details:
+                            evidence_count = details["evidence_count"]
+                            st.write(f"**Evidence Items:** {evidence_count}")
+                        
+                        if "reading" in details:
+                            st.write(f"**Currently Reading:** {details['reading']} - {details.get('section', '')}")
+                        
+                        if "evidence_items_used" in details:
+                            st.write(f"**Evidence Used for Synthesis:** {details['evidence_items_used']} items")
+                
+                # Check if research is complete
+                if update.get("step") == "completed":
+                    final_result = details.get("final_answer", "")
+                    break
+                elif update.get("step") == "error":
+                    error_msg = update.get("message", "Unknown error")
+                    if "ended prematurely" in error_msg or update_count == 0:
+                        st.warning("⚠️ Streaming connection issue. Falling back to regular research...")
+                        streaming_failed = True
+                        break
+                    else:
+                        st.error(f"Research failed: {error_msg}")
+                        return
+                    
+                # Small delay to make progress visible
+                time.sleep(0.1)
+            
+            # Fallback to regular research if streaming failed
+            if streaming_failed or update_count == 0:
+                st.info("🔄 Using fallback research method...")
+                progress_text.text("🔍 Conducting research (fallback mode)...")
+                progress_bar.progress(0.5)
+                
+                fallback_result = api_client.conduct_research(question)
+                if fallback_result.get("status") == "completed":
+                    final_result = fallback_result.get("answer", "")
+                    progress_bar.progress(1.0)
+                    progress_text.text("✅ Research completed!")
+                else:
+                    st.error("Both streaming and fallback research failed.")
+                    return
+        
+        except Exception as e:
+            st.error(f"Error during research: {e}")
+            return
+        
+        end_time = time.time()
+        
+        # Clear progress indicators
+        status_container.empty()
+        
+        # Create research result object for compatibility
+        research_result = {
+            "answer": final_result,
+            "status": "completed",
+            "processing_time": end_time - start_time
+        }
+        
+        # Display results
+        with result_container:
+            if research_result.get("status") == "completed":
+                st.success(f"✅ Research completed in {research_result.get('processing_time', end_time - start_time):.1f} seconds")
+                
+                # Display the research question and answer
+                st.markdown("### 📝 Research Question")
+                st.markdown(f"*{question}*")
+                
+                st.markdown("### 📋 Research Findings")
+                answer = research_result.get("answer", "")
+                
+                # Format the answer nicely
+                if answer:
+                    # Replace multiple newlines with proper spacing
+                    formatted_answer = answer.replace('\n\n', '\n\n')
+                    st.markdown(formatted_answer)
+                else:
+                    st.warning("No detailed findings were generated.")
+                
+                # Add option to save or export results
+                st.markdown("---")
+                col1, col2, col3 = st.columns([1, 1, 1])
+                
+                with col1:
+                    if st.button("📥 Download Results"):
+                        research_report = f"""
+# 10-K Research Report
+
+## Question
+{question}
+
+## Findings
+{answer}
+
+## Generated on
+{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+---
+Generated by 10-K Knowledge Base AI Research Assistant
+                        """
+                        st.download_button(
+                            label="Download as Text File",
+                            data=research_report,
+                            file_name=f"research_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            mime="text/plain"
+                        )
+                
+                with col2:
+                    if st.button("🔄 New Research"):
+                        st.rerun()
+                
+            else:
+                st.error("❌ Research failed")
+                error_msg = research_result.get("answer", "Unknown error occurred")
+                st.error(f"Error details: {error_msg}")
+                
+                # Troubleshooting suggestions
+                with st.expander("🛠️ Troubleshooting"):
+                    st.markdown("""
+                    **Common issues:**
+                    - API connection problems - check if the backend is running
+                    - Model loading issues - ensure the AI model is properly downloaded
+                    - Database access problems - verify the 10-K database exists
+                    
+                    **Try:**
+                    - Refreshing the page
+                    - Using a simpler research question
+                    - Checking the API logs for detailed error information
+                    """)
+    
+    elif submitted and not question:
+        st.error("Please enter a research question.")
+
 def analytics_page():
     """Analytics and statistics page."""
     
@@ -445,6 +781,7 @@ def about_page():
     across corporate disclosures.
     
     ### Features
+    - **AI-powered research** - Ask complex questions and get comprehensive analysis
     - **Full-text search** across all 10-K content
     - **Section-specific filtering** (Business, Risk Factors, MD&A, etc.)
     - **Company and year filtering** for targeted analysis
@@ -458,16 +795,18 @@ def about_page():
     - Company metadata and filing dates
     
     ### Technology Stack
+    - **AI Research:** Qwen2.5-7B language model + custom research pipeline
     - **Backend:** FastAPI + DuckDB + Parquet
     - **Frontend:** Streamlit
     - **Data Processing:** BeautifulSoup + pandas
     - **Storage:** Optimized columnar format for analytics
     
     ### Usage Tips
-    - Use specific terms for better results (e.g., "artificial intelligence" vs "AI")
-    - Combine filters to narrow down results
-    - Check the Analytics page for dataset overview
-    - Use Company Overview for deep-dives into specific companies
+    - **AI Research:** Ask complex, multi-part questions for comprehensive analysis
+    - **Search:** Use specific terms for better results (e.g., "artificial intelligence" vs "AI")
+    - **Filters:** Combine company, year, and section filters to narrow down results
+    - **Analytics:** Check the Analytics page for dataset overview
+    - **Company Deep-dive:** Use Company Overview for detailed company analysis
     """)
     
     # API status check

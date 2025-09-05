@@ -25,14 +25,15 @@ from tools_10k import TenKSearchTool, TenKReadTool
 # Configuration
 # --------------------------
 MODEL_PATH = os.getenv("LLAMA_GGUF", "../models/Qwen2.5-7B-Instruct-Q4_K_M.gguf")  # Default to Qwen2.5 7B quantized
-N_CTX = int(os.getenv("LLAMA_N_CTX", "8192"))                     # Context window
+N_CTX = int(os.getenv("LLAMA_N_CTX", "16384"))                    # Increased context window for faster processing
 MAX_GEN_TOK = int(os.getenv("LLAMA_MAX_TOK", "800"))             # Max generation tokens
 
 # Research parameters
 MAX_SEARCH_QUERIES = 3        # Maximum search queries to generate
 MAX_RESULTS_PER_QUERY = 4     # Results per search query
 MAX_DETAILED_READS = 3        # Maximum detailed section reads
-MAX_EVIDENCE_ITEMS = 8        # Maximum evidence items for final synthesis
+MAX_EVIDENCE_ITEMS = 5        # Reduced from 8 for faster synthesis
+EVIDENCE_CHUNK_SIZE = 1200    # Reduced from 2000 for faster processing
 
 
 # --------------------------
@@ -153,8 +154,9 @@ def build_model() -> LlamaCppModel:
         model_path=str(model_path),
         n_ctx=N_CTX,
         max_tokens=MAX_GEN_TOK,
-        temperature=0.2,
+        temperature=0.1,  # Lower temperature for faster, more deterministic generation
         top_p=0.95,
+        n_threads=8,      # Optimize CPU threads for faster processing
         repeat_penalty=1.1,
         verbose=False,
     )
@@ -272,12 +274,12 @@ def conduct_10k_research(question: str) -> str:
             ticker=evidence.ticker,
             year=evidence.fiscal_year,
             section=evidence.section_name,
-            max_chars=3000,  # Limit for context window
+            max_chars=2500,  # Reduced limit for faster processing
         )
         
         if read_result.get("found"):
             # Update evidence with full content
-            evidence.content_snippet = read_result.get("content", "")[:2000]  # Keep manageable
+            evidence.content_snippet = read_result.get("content", "")[:EVIDENCE_CHUNK_SIZE]  # Use configurable chunk size
             detailed_reads += 1
         else:
             print(f"     ⚠️  Could not read section")
@@ -287,17 +289,28 @@ def conduct_10k_research(question: str) -> str:
     # Step 4: Synthesize final answer
     print("\n✍️  Synthesizing final answer...")
     
-    # Prepare evidence for synthesis
+    # Prepare evidence for synthesis (optimized)
     evidence_text = ""
     citations = []
     
-    for i, evidence in enumerate(context.evidence[:MAX_EVIDENCE_ITEMS], 1):
-        evidence_text += f"[{i}] {evidence.company_name} ({evidence.ticker}) - {evidence.fiscal_year} - {evidence.section_name}:\n"
-        evidence_text += f"{evidence.content_snippet}\n\n"
+    # Use only the most relevant evidence items
+    relevant_evidence = context.evidence[:MAX_EVIDENCE_ITEMS]
+    
+    for i, evidence in enumerate(relevant_evidence, 1):
+        # Create concise evidence entries
+        evidence_text += f"[{i}] {evidence.company_name} ({evidence.ticker}) {evidence.fiscal_year} - {evidence.section_name}:\n"
+        evidence_text += f"{evidence.content_snippet[:EVIDENCE_CHUNK_SIZE]}\n\n"
         
         citations.append(f"[{i}] {evidence.company_name} ({evidence.ticker}) {evidence.fiscal_year} 10-K, {evidence.section_name}")
     
     citations_text = "\n".join(citations)
+    
+    # Optimize prompt length to fit context window efficiently
+    estimated_prompt_length = len(question) + len(evidence_text) + len(citations_text) + 1000  # buffer for template
+    if estimated_prompt_length > N_CTX * 0.7:  # Use 70% of context to leave room for generation
+        print("⚡ Optimizing prompt length for faster processing...")
+        # Truncate evidence if needed
+        evidence_text = evidence_text[:int(N_CTX * 0.5)]  # Use 50% for evidence
     
     # Generate final synthesis
     synthesis_prompt = EVIDENCE_SYNTHESIZER_PROMPT.format(

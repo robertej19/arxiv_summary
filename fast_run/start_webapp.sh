@@ -1,132 +1,109 @@
 #!/bin/bash
 
-echo "Starting 10-K Knowledge Base Web Application..."
+# 10-K Knowledge Base Web Application Startup Script
+# Starts both the FastAPI backend and Streamlit frontend
 
-# Function to check if a port is in use
-check_port() {
-    local port=$1
-    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
-        return 0  # Port is in use
-    else
-        return 1  # Port is free
-    fi
-}
+set -e
 
-# Function to get process info for a port
-get_process_info() {
-    local port=$1
-    lsof -Pi :$port -sTCP:LISTEN | tail -n +2
-}
+echo "🚀 Starting 10-K Knowledge Base Web Application"
+echo "=============================================="
 
-# Install web dependencies
-echo "Installing web dependencies..."
-uv pip install -r requirements_web.txt
-
-# Check if knowledge base exists
-if [ ! -f "10k_knowledge_base.db" ]; then
-    echo "Error: Knowledge base not found!"
-    echo "Please run 'python build_10k_knowledge_base.py' first to create the database."
+# Check if we're in the right directory
+if [ ! -f "api.py" ] || [ ! -f "streamlit_app.py" ]; then
+    echo "❌ Error: Please run this script from the fast_run directory"
     exit 1
 fi
 
-# Check if FastAPI backend is already running (port 8000)
-if check_port 8000; then
-    echo "✅ FastAPI backend already running on port 8000"
-    echo "   Process info: $(get_process_info 8000)"
-    API_RUNNING=true
-else
-    echo "🔌 Starting FastAPI backend..."
-    python api.py &
-    API_PID=$!
-    API_RUNNING=false
-    sleep 3  # Wait for API to start
+# Check if virtual environment exists
+if [ ! -d ".venv" ]; then
+    echo "❌ Error: Virtual environment not found at .venv"
+    echo "   Please run setup first or create the virtual environment"
+    exit 1
 fi
 
-# Check if Streamlit is already running (port 8501)
-if check_port 8501; then
-    echo "✅ Streamlit frontend already running on port 8501"
-    echo "   Process info: $(get_process_info 8501)"
-    STREAMLIT_RUNNING=true
-else
-    echo "📊 Starting Streamlit frontend..."
-    streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true &
-    STREAMLIT_PID=$!
-    STREAMLIT_RUNNING=false
-    sleep 2  # Wait for Streamlit to start
+# Activate virtual environment
+echo "📦 Activating virtual environment..."
+source .venv/bin/activate
+
+# Check if 10-K database exists
+if [ ! -f "10k_knowledge_base.db" ]; then
+    echo "⚠️  Warning: 10-K knowledge base not found at 10k_knowledge_base.db"
+    echo "   Some features may not work properly"
 fi
 
-echo ""
-echo "🚀 Web application status:"
-echo ""
-
-# Check final status
-if check_port 8000; then
-    echo "✅ Backend API (FastAPI): http://localhost:8000"
-    echo "   📖 API Documentation: http://localhost:8000/docs"
-else
-    echo "❌ Backend API failed to start"
-fi
-
-if check_port 8501; then
-    echo "✅ Frontend (Streamlit): http://localhost:8501"
-else
-    echo "❌ Frontend failed to start"
-fi
-
-echo ""
-
-# Only set up cleanup for processes we started
-if [ "$API_RUNNING" = false ] && [ "$STREAMLIT_RUNNING" = false ]; then
-    echo "Press Ctrl+C to stop both services"
-    
-    # Function to cleanup on exit
-    cleanup() {
-        echo ""
-        echo "Shutting down services..."
-        [ ! -z "$API_PID" ] && kill $API_PID 2>/dev/null
-        [ ! -z "$STREAMLIT_PID" ] && kill $STREAMLIT_PID 2>/dev/null
-        echo "Services stopped."
-        exit 0
-    }
-    
-    # Set up signal handling
-    trap cleanup SIGINT SIGTERM
-    
-    # Wait for processes
-    wait $API_PID $STREAMLIT_PID
-
-elif [ "$API_RUNNING" = false ]; then
-    echo "Press Ctrl+C to stop the API service (Streamlit was already running)"
-    
-    cleanup() {
-        echo ""
-        echo "Shutting down API..."
-        [ ! -z "$API_PID" ] && kill $API_PID 2>/dev/null
-        echo "API stopped."
-        exit 0
-    }
-    
-    trap cleanup SIGINT SIGTERM
-    wait $API_PID
-
-elif [ "$STREAMLIT_RUNNING" = false ]; then
-    echo "Press Ctrl+C to stop the Streamlit service (API was already running)"
-    
-    cleanup() {
-        echo ""
-        echo "Shutting down Streamlit..."
-        [ ! -z "$STREAMLIT_PID" ] && kill $STREAMLIT_PID 2>/dev/null
-        echo "Streamlit stopped."
-        exit 0
-    }
-    
-    trap cleanup SIGINT SIGTERM
-    wait $STREAMLIT_PID
-
-else
-    echo "Both services were already running. Nothing to monitor."
+# Function to cleanup background processes on exit
+cleanup() {
     echo ""
-    echo "To stop services manually:"
-    echo "  - Kill processes using ports 8000 and 8501"
-    echo "  - Or use: pkill -f 'api.py' && pkill -f 'streamlit'"
+    echo "🛑 Shutting down services..."
+    if [ ! -z "$API_PID" ]; then
+        echo "   Stopping API server (PID: $API_PID)..."
+        kill $API_PID 2>/dev/null || true
+    fi
+    if [ ! -z "$FRONTEND_PID" ]; then
+        echo "   Stopping Streamlit frontend (PID: $FRONTEND_PID)..."
+        kill $FRONTEND_PID 2>/dev/null || true
+    fi
+    echo "✅ Shutdown complete"
+    exit 0
+}
+
+# Set up signal handlers for clean shutdown
+trap cleanup SIGINT SIGTERM
+
+echo ""
+echo "🔧 Starting backend API server..."
+python api.py &
+API_PID=$!
+echo "   API server started (PID: $API_PID)"
+
+# Wait a moment for API to start
+sleep 3
+
+# Check if API is running
+if ! curl -s http://localhost:8000/ >/dev/null 2>&1; then
+    echo "❌ Error: API server failed to start"
+    cleanup
 fi
+
+echo "✅ API server is running at http://localhost:8000"
+
+echo ""
+echo "🎨 Starting Streamlit frontend..."
+python -m streamlit run streamlit_app.py --server.port 8501 --server.headless true &
+FRONTEND_PID=$!
+echo "   Streamlit frontend started (PID: $FRONTEND_PID)"
+
+# Wait for Streamlit to start
+echo "   Waiting for Streamlit to initialize..."
+for i in {1..15}; do
+    if curl -s http://localhost:8501/ >/dev/null 2>&1; then
+        break
+    fi
+    echo "   ... checking ($i/15)"
+    sleep 2
+done
+
+if curl -s http://localhost:8501/ >/dev/null 2>&1; then
+    echo "✅ Streamlit frontend is running at http://localhost:8501"
+else
+    echo "⚠️  Streamlit may still be starting up at http://localhost:8501"
+fi
+
+echo ""
+echo "🎉 Application is ready!"
+echo "========================================"
+echo "📊 Frontend (Streamlit): http://localhost:8501"
+echo "🔧 Backend API:          http://localhost:8000"
+echo "📚 API Documentation:    http://localhost:8000/docs"
+echo ""
+echo "Features available:"
+echo "  • 🔍 Search 10-K filings"
+echo "  • 🤖 AI-powered research"
+echo "  • 📈 Analytics dashboard"
+echo "  • 🏢 Company overviews"
+echo ""
+echo "Press Ctrl+C to stop all services"
+echo "========================================"
+
+# Keep the script running and wait for both processes
+wait $API_PID $FRONTEND_PID
