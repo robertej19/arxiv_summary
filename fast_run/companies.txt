@@ -1,0 +1,11 @@
+# Format: CIK,TICKER,COMPANY_NAME
+0000320193,AAPL,Apple Inc.
+0000789019,MSFT,Microsoft Corporation
+0001652044,GOOGL,Alphabet Inc.
+0001018724,AMZN,Amazon.com Inc.
+0001045810,NVDA,NVIDIA Corporation
+0000051143,IBM,International Business Machines Corporation
+0000072971,WMT,Walmart Inc.
+0000034088,XOM,Exxon Mobil Corporation
+0000066740,MMM,3M Company
+0000019617,JPM,JPMorgan Chase & Co.
