@@ -1,9 +1,16 @@
-# deep_research_and_rag/tenk_research_agent.py
 """
 10-K Deep Research Agent using SmolagentsAI
 
 A specialized research agent that can quickly search through 10-K SEC filings
 and synthesize comprehensive answers about companies, industries, and business trends.
+
+Usage:
+    python tenk_research_agent.py "How are major tech companies approaching AI?"
+    
+Environment Variables:
+    LLAMA_GGUF: Path to GGUF model file (default: ../models/Qwen2.5-7B-Instruct-Q4_K_M.gguf)
+    LLAMA_N_CTX: Context window size (default: 8192)
+    LLAMA_MAX_TOK: Max generation tokens (default: 800)
 """
 
 from __future__ import annotations
@@ -145,6 +152,8 @@ def build_model() -> LlamaCppModel:
             print("Available alternatives searched:", file=sys.stderr)
             for alt in alt_paths:
                 print(f"  {alt}", file=sys.stderr)
+            print("\nTo download the model, run:", file=sys.stderr)
+            print("  bash download_model.sh", file=sys.stderr)
             sys.exit(1)
     
     print(f"Loading model from: {model_path}")
@@ -344,6 +353,8 @@ def main():
         
     except Exception as e:
         print(f"\n❌ Error during research: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         return 1
     
     return 0
