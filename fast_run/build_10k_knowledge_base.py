@@ -258,18 +258,10 @@ class TenKKnowledgeBase:
     def _setup_database(self):
         """Set up DuckDB database schema."""
         
-        # Drop existing tables to fix schema issues
-        self.conn.execute("DROP TABLE IF EXISTS sections")
-        self.conn.execute("DROP TABLE IF EXISTS filings")
-        
-        # Main filings table with proper auto-increment
+        # Main filings table
         self.conn.execute("""
-            CREATE SEQUENCE IF NOT EXISTS filing_id_seq
-        """)
-        
-        self.conn.execute("""
-            CREATE TABLE filings (
-                id INTEGER PRIMARY KEY DEFAULT nextval('filing_id_seq'),
+            CREATE TABLE IF NOT EXISTS filings (
+                id INTEGER PRIMARY KEY,
                 file_path VARCHAR,
                 content_hash VARCHAR UNIQUE,
                 parsed_date TIMESTAMP,
@@ -290,12 +282,8 @@ class TenKKnowledgeBase:
         
         # Sections table for detailed section analysis
         self.conn.execute("""
-            CREATE SEQUENCE IF NOT EXISTS section_id_seq
-        """)
-        
-        self.conn.execute("""
-            CREATE TABLE sections (
-                id INTEGER PRIMARY KEY DEFAULT nextval('section_id_seq'),
+            CREATE TABLE IF NOT EXISTS sections (
+                id INTEGER PRIMARY KEY,
                 filing_id INTEGER,
                 section_name VARCHAR,
                 content TEXT,
@@ -379,7 +367,7 @@ class TenKKnowledgeBase:
         # Remove full_text from main_data to keep it lean
         full_text = main_data.pop('full_text', '')
         
-        # Insert main filing record - let DuckDB auto-generate the ID
+        # Insert main filing record
         filing_id = self.conn.execute("""
             INSERT INTO filings (
                 file_path, content_hash, parsed_date, file_size_bytes,
@@ -406,7 +394,7 @@ class TenKKnowledgeBase:
             main_data.get('full_text_word_count'),
         )).fetchone()[0]
         
-        # Insert sections - let DuckDB auto-generate the section IDs
+        # Insert sections
         for section_name, section_info in sections_data.items():
             self.conn.execute("""
                 INSERT INTO sections (filing_id, section_name, content, content_length, word_count)
