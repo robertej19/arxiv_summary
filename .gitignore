@@ -1,3 +1,13 @@
+*.npy
+*.duckdb
+*.sqlite
+*.sqli*
+*.par*
+*.csv
+*.txt
+*.html
+*.htm
+*.xm*
 *.index
 *.pkl
 *.pyc

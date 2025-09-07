@@ -78,6 +78,10 @@ class Evidence:
     content_snippet: str
     citation: str
     relevance_score: float = 0.0
+    # Enhanced fields for citation linking
+    citation_id: Optional[str] = None  # Unique ID for this citation
+    file_path: Optional[str] = None    # Path to original HTML file
+    search_text: Optional[str] = None  # Text used for highlighting in source
 
 
 @dataclass
@@ -277,6 +281,10 @@ def conduct_10k_research(question: str) -> str:
         
         # Convert to evidence
         for result in results:
+            # Generate unique citation ID
+            import hashlib
+            citation_id = hashlib.md5(f"{result.get('ticker', '')}_{result.get('fiscal_year', 0)}_{result.get('section_name', '')}_{query}".encode()).hexdigest()[:8]
+            
             evidence = Evidence(
                 ticker=result.get("ticker", ""),
                 company_name=result.get("company_name", ""),
@@ -285,6 +293,9 @@ def conduct_10k_research(question: str) -> str:
                 content_snippet=result.get("snippet", ""),
                 citation=result.get("citation", ""),
                 relevance_score=1.0,  # Could implement scoring
+                citation_id=citation_id,
+                file_path=result.get("file_path", ""),
+                search_text=query,  # Store the search query for highlighting
             )
             context.add_evidence(evidence)
     
@@ -332,7 +343,11 @@ def conduct_10k_research(question: str) -> str:
         evidence_text += f"[{i}] {evidence.company_name} ({evidence.ticker}) {evidence.fiscal_year} - {evidence.section_name}:\n"
         evidence_text += f"{evidence.content_snippet[:EVIDENCE_CHUNK_SIZE]}\n\n"
         
-        citations.append(f"[{i}] {evidence.company_name} ({evidence.ticker}) {evidence.fiscal_year} 10-K, {evidence.section_name}")
+        # Include citation ID in citations for frontend linking
+        citation_info = f"[{i}] {evidence.company_name} ({evidence.ticker}) {evidence.fiscal_year} 10-K, {evidence.section_name}"
+        if evidence.citation_id:
+            citation_info += f" [cite:{evidence.citation_id}]"
+        citations.append(citation_info)
     
     citations_text = "\n".join(citations)
     

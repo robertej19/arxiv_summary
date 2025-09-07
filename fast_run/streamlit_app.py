@@ -178,6 +178,20 @@ class APIClient:
                 "message": f"Research failed: {e}",
                 "progress": 0.0
             }
+    
+    def get_citation_source(self, citation_id: str, search_text: str) -> Dict:
+        """Get citation source with highlighting."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/citation/{citation_id}",
+                params={"search_text": search_text},
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Citation API Error: {e}")
+            return {}
 
 # Initialize API client
 @st.cache_resource
@@ -187,6 +201,136 @@ def get_api_client(version="v2"):  # Added version to force cache refresh
 # Clear cache if needed (for development)
 def clear_api_cache():
     get_api_client.clear()
+
+def make_citations_clickable(text: str, api_client: APIClient) -> str:
+    """Convert citation markers [1], [2], etc. into clickable elements."""
+    import re
+    
+    # Find all citation patterns like [1], [2], etc.
+    citation_pattern = r'\[(\d+)\]'
+    citations = re.findall(citation_pattern, text)
+    
+    if not citations:
+        return text
+    
+    # Store citation data for modal display
+    if 'citation_data' not in st.session_state:
+        st.session_state.citation_data = {}
+    
+    # Replace citations with clickable buttons
+    def replace_citation(match):
+        citation_num = match.group(1)
+        
+        # Create unique key for this citation
+        citation_key = f"cite_{citation_num}"
+        
+        # Return a placeholder that we'll replace with actual button
+        return f"<<CITATION_BUTTON_{citation_num}>>"
+    
+    # Replace citations with placeholders
+    processed_text = re.sub(citation_pattern, replace_citation, text)
+    
+    return processed_text, citations
+
+def display_answer_with_citations(answer: str, api_client: APIClient):
+    """Display research answer with clickable citations."""
+    import re
+    
+    # Extract citation IDs from the answer text (look for [cite:xyz] patterns)
+    cite_id_pattern = r'\[cite:([a-f0-9]+)\]'
+    citation_ids = {}
+    
+    # Find all citation IDs and map them to citation numbers
+    cite_matches = re.finditer(cite_id_pattern, answer)
+    for match in cite_matches:
+        citation_id = match.group(1)
+        # Extract the citation number that appears before this cite ID
+        before_text = answer[:match.start()]
+        citation_num_matches = re.findall(r'\[(\d+)\]', before_text)
+        if citation_num_matches:
+            citation_num = citation_num_matches[-1]  # Get the last citation number
+            citation_ids[citation_num] = citation_id
+    
+    # Clean the answer by removing cite IDs
+    clean_answer = re.sub(cite_id_pattern, '', answer)
+    
+    # Split text by citation markers
+    parts = re.split(r'(\[\d+\])', clean_answer)
+    
+    # Display text with clickable citations
+    for part in parts:
+        citation_match = re.match(r'\[(\d+)\]', part)
+        if citation_match:
+            citation_num = citation_match.group(1)
+            citation_id = citation_ids.get(citation_num)
+            
+            if citation_id:
+                # Create clickable citation
+                if st.button(f"[{citation_num}]", key=f"cite_btn_{citation_num}", 
+                           help="Click to view source", type="secondary"):
+                    # Show citation source in modal
+                    show_citation_modal(citation_id, api_client)
+            else:
+                st.markdown(part, unsafe_allow_html=True)
+        else:
+            # Regular text
+            if part.strip():
+                st.markdown(part, unsafe_allow_html=True)
+
+def show_citation_modal(citation_id: str, api_client: APIClient):
+    """Display citation source in a modal-like container."""
+    
+    # Get a reasonable search text (could be improved)
+    search_text = st.session_state.get('current_question', 'AI')  # Use current question as search
+    
+    with st.spinner("Loading citation source..."):
+        citation_data = api_client.get_citation_source(citation_id, search_text)
+    
+    if citation_data and citation_data.get('status') == 'success':
+        with st.container():
+            st.markdown("---")
+            st.markdown("### 📄 Citation Source")
+            
+            # Header with citation info
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(f"**{citation_data['company_name']} ({citation_data['ticker']}) - {citation_data['fiscal_year']}**")
+                st.markdown(f"*Section: {citation_data['section_name']}*")
+            
+            with col2:
+                if st.button("❌ Close", key=f"close_cite_{citation_id}"):
+                    st.rerun()
+            
+            # Display highlighted HTML content
+            highlighted_html = citation_data.get('highlighted_html', '')
+            if highlighted_html:
+                st.markdown("#### Original Source:")
+                
+                # Clean up the HTML for better display
+                cleaned_html = highlighted_html.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
+                
+                # Display in a styled container
+                st.markdown(
+                    f"""
+                    <div style="
+                        background-color: #f0f2f6; 
+                        padding: 1rem; 
+                        border-radius: 0.5rem; 
+                        border-left: 4px solid #1f77b4;
+                        max-height: 600px;
+                        overflow-y: auto;
+                        font-family: monospace;
+                        white-space: pre-wrap;
+                    ">
+                        {cleaned_html}
+                    </div>
+                    """, 
+                    unsafe_allow_html=True
+                )
+            
+            st.markdown("---")
+    else:
+        st.error(f"Could not load citation source: {citation_data.get('status', 'unknown error')}")
 
 # Cache API calls for better performance
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -454,6 +598,10 @@ def research_page():
             help="Ask a comprehensive question about business trends, strategies, risks, or any topic covered in 10-K filings"
         )
         
+        # Store the question in session state for citation lookups
+        if question:
+            st.session_state['current_question'] = question
+        
         col1, col2, col3 = st.columns([1, 1, 1])
         with col2:
             submitted = st.form_submit_button("🚀 Start Research", type="primary", use_container_width=True)
@@ -586,11 +734,9 @@ def research_page():
                 st.markdown("### 📋 Research Findings")
                 answer = research_result.get("answer", "")
                 
-                # Format the answer nicely
+                # Display answer with clickable citations
                 if answer:
-                    # Replace multiple newlines with proper spacing
-                    formatted_answer = answer.replace('\n\n', '\n\n')
-                    st.markdown(formatted_answer)
+                    display_answer_with_citations(answer, api_client)
                 else:
                     st.warning("No detailed findings were generated.")
                 

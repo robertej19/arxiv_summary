@@ -68,12 +68,15 @@ class KnowledgeBaseStats(BaseModel):
 
 class ResearchRequest(BaseModel):
     question: str = Field(..., description="Research question to analyze")
+    mode: Optional[str] = Field("fast", description="Research mode: 'ultra_fast', 'fast', or 'deep'")
     
 class ResearchResponse(BaseModel):
     question: str
     answer: str
     status: str
+    mode: str
     processing_time: Optional[float] = None
+    cached: Optional[bool] = None
 
 class ProgressUpdate(BaseModel):
     step: str
@@ -81,6 +84,17 @@ class ProgressUpdate(BaseModel):
     progress: float  # 0.0 to 1.0
     details: Optional[Dict[str, Any]] = None
     timestamp: Optional[float] = None
+
+class CitationResponse(BaseModel):
+    citation_id: str
+    ticker: str
+    company_name: str
+    fiscal_year: int
+    section_name: str
+    file_path: str
+    search_text: str
+    highlighted_html: str
+    status: str
 
 class TenKAPI:
     """API interface for 10-K Knowledge Base."""
@@ -324,6 +338,142 @@ class TenKAPI:
             
         finally:
             conn.close()
+    
+    def get_citation_source(self, citation_id: str, search_text: str) -> CitationResponse:
+        """Get the original HTML source for a citation with highlighting."""
+        from bs4 import BeautifulSoup
+        import re
+        
+        # Parse citation_id to extract ticker, year, section (if we can)
+        # For now, we'll search the database to find the matching citation
+        conn = self.get_connection()
+        
+        try:
+            # First, try to find the filing and section based on common patterns
+            # This is a simplified approach - in production you'd store citation mappings
+            sql = """
+                SELECT DISTINCT
+                    f.id,
+                    f.ticker,
+                    f.company_name, 
+                    f.fiscal_year,
+                    f.file_path,
+                    s.section_name,
+                    s.content
+                FROM filings f
+                JOIN sections s ON f.id = s.filing_id  
+                WHERE s.content ILIKE ?
+                ORDER BY f.filing_date DESC
+                LIMIT 5
+            """
+            
+            results = conn.execute(sql, [f'%{search_text}%']).fetchall()
+            
+            if not results:
+                return CitationResponse(
+                    citation_id=citation_id,
+                    ticker="",
+                    company_name="",
+                    fiscal_year=0,
+                    section_name="",
+                    file_path="",
+                    search_text=search_text,
+                    highlighted_html="Citation source not found",
+                    status="not_found"
+                )
+            
+            # Take the first result (most recent)
+            filing_id, ticker, company_name, fiscal_year, file_path, section_name, content = results[0]
+            
+            # Try to read the original HTML file
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    html_content = f.read()
+                
+                # Parse HTML and highlight the search text
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Remove script and style elements for cleaner display
+                for script in soup(["script", "style"]):
+                    script.decompose()
+                
+                # Find and highlight the search text
+                highlighted_html = self._highlight_text_in_html(str(soup), search_text)
+                
+                return CitationResponse(
+                    citation_id=citation_id,
+                    ticker=ticker,
+                    company_name=company_name,
+                    fiscal_year=fiscal_year,
+                    section_name=section_name,
+                    file_path=file_path,
+                    search_text=search_text,
+                    highlighted_html=highlighted_html,
+                    status="success"
+                )
+                
+            except FileNotFoundError:
+                return CitationResponse(
+                    citation_id=citation_id,
+                    ticker=ticker,
+                    company_name=company_name,
+                    fiscal_year=fiscal_year,
+                    section_name=section_name,
+                    file_path=file_path,
+                    search_text=search_text,
+                    highlighted_html=f"Original file not found: {file_path}",
+                    status="file_not_found"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error retrieving citation source: {e}")
+            return CitationResponse(
+                citation_id=citation_id,
+                ticker="",
+                company_name="",
+                fiscal_year=0,
+                section_name="",
+                file_path="",
+                search_text=search_text,
+                highlighted_html=f"Error retrieving citation: {str(e)}",
+                status="error"
+            )
+        finally:
+            conn.close()
+    
+    def _highlight_text_in_html(self, html_content: str, search_text: str) -> str:
+        """Highlight search text in HTML content."""
+        if not search_text or len(search_text.strip()) < 3:
+            return html_content[:5000]  # Return first 5000 chars if no search
+        
+        # Create a case-insensitive regex pattern
+        import re
+        pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+        
+        # Replace matches with highlighted version
+        highlighted = pattern.sub(
+            f'<mark style="background-color: yellow; padding: 2px; border-radius: 3px;">{search_text}</mark>',
+            html_content
+        )
+        
+        # Find the first occurrence and return context around it
+        first_match = pattern.search(html_content)
+        if first_match:
+            start_pos = max(0, first_match.start() - 2000)
+            end_pos = min(len(highlighted), first_match.end() + 2000)
+            
+            context = highlighted[start_pos:end_pos]
+            
+            # Add indicator if we're showing partial content
+            if start_pos > 0:
+                context = "...\n" + context
+            if end_pos < len(highlighted):
+                context = context + "\n..."
+                
+            return context
+        
+        # If no match found, return beginning of document
+        return highlighted[:5000]
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -363,7 +513,9 @@ async def root():
             "/stats": "Get knowledge base statistics",
             "/tickers": "List available tickers",
             "/sections": "List available sections",
-            "/research": "AI-powered research on 10-K filings"
+            "/research": "AI-powered research on 10-K filings (supports fast modes)",
+            "/research/modes": "Available research modes and their capabilities",
+            "/citation/{citation_id}": "Get original source for a citation"
         }
     }
 
@@ -415,24 +567,93 @@ async def get_available_sections():
         logger.error(f"Sections error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/citation/{citation_id}", response_model=CitationResponse)
+async def get_citation_source(
+    citation_id: str, 
+    search_text: str = Query(..., description="Text to highlight in the source")
+):
+    """Get the original HTML source for a citation with highlighting."""
+    try:
+        return api.get_citation_source(citation_id, search_text)
+    except Exception as e:
+        logger.error(f"Citation source error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/research/modes")
+async def get_research_modes():
+    """Get available research modes and their capabilities."""
+    return {
+        "modes": {
+            "ultra_fast": {
+                "name": "Ultra-Fast Research",
+                "response_time": "< 0.1 seconds",
+                "description": "Instant responses using pre-computed templates for common topics",
+                "best_for": ["AI risks", "cybersecurity", "supply chain", "climate change"],
+                "limitations": "Limited to pre-defined topic templates"
+            },
+            "fast": {
+                "name": "Fast Research", 
+                "response_time": "1-3 seconds",
+                "description": "Dynamic queries with lightweight LLM synthesis",
+                "best_for": ["Most research questions", "custom analysis", "specific companies"],
+                "limitations": "Shorter responses than deep mode"
+            },
+            "deep": {
+                "name": "Deep Research",
+                "response_time": "30+ seconds", 
+                "description": "Comprehensive multi-step research with detailed analysis",
+                "best_for": ["Complex analysis", "comprehensive reports", "multi-company comparisons"],
+                "limitations": "Slower response time"
+            }
+        },
+        "default": "fast",
+        "recommendation": "Use 'ultra_fast' for common topics, 'fast' for most questions, 'deep' for comprehensive analysis"
+    }
+
 @app.post("/research", response_model=ResearchResponse)
 async def conduct_research(request: ResearchRequest):
-    """Conduct AI-powered research on 10-K filings."""
+    """Conduct AI-powered research on 10-K filings with multiple speed modes."""
     import time
     start_time = time.time()
     
+    # Validate mode
+    valid_modes = ["ultra_fast", "fast", "deep"]
+    mode = request.mode or "fast"
+    if mode not in valid_modes:
+        raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'. Valid modes: {valid_modes}")
+    
     try:
-        # Import research function
+        # Import appropriate research function based on mode
         sys.path.append(os.path.join(os.path.dirname(__file__), 'deep_research_and_rag'))
-        from tenk_research_agent import conduct_10k_research
         
-        # Run research in thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(
-            executor, 
-            conduct_10k_research, 
-            request.question
-        )
+        answer = None
+        cached = False
+        
+        if mode == "ultra_fast":
+            from ultra_fast_agent import ultra_fast_research
+            # Run ultra-fast research (usually instant, no need for thread pool)
+            answer = ultra_fast_research(request.question, verbose=False)
+            
+        elif mode == "fast":
+            from fast_tenk_agent import fast_10k_research
+            # Run fast research in thread pool
+            loop = asyncio.get_event_loop()
+            answer = await loop.run_in_executor(
+                executor, 
+                fast_10k_research, 
+                request.question,
+                False  # verbose=False
+            )
+            
+        elif mode == "deep":
+            from tenk_research_agent import conduct_10k_research
+            # Run deep research in thread pool  
+            loop = asyncio.get_event_loop()
+            answer = await loop.run_in_executor(
+                executor, 
+                conduct_10k_research, 
+                request.question
+            )
         
         processing_time = time.time() - start_time
         
@@ -440,17 +661,30 @@ async def conduct_research(request: ResearchRequest):
             question=request.question,
             answer=answer,
             status="completed",
+            mode=mode,
+            processing_time=processing_time,
+            cached=cached
+        )
+        
+    except ImportError as e:
+        logger.error(f"Research module import error: {e}")
+        processing_time = time.time() - start_time
+        return ResearchResponse(
+            question=request.question,
+            answer=f"Research mode '{mode}' not available: {str(e)}",
+            status="error", 
+            mode=mode,
             processing_time=processing_time
         )
         
     except Exception as e:
         logger.error(f"Research error: {e}")
         processing_time = time.time() - start_time
-        
         return ResearchResponse(
             question=request.question,
             answer=f"Research failed: {str(e)}",
-            status="error", 
+            status="error",
+            mode=mode, 
             processing_time=processing_time
         )
 

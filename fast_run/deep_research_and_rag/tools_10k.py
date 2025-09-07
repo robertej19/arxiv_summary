@@ -99,7 +99,8 @@ class TenKSearchTool(Tool):
                         ELSE
                             substr(s.content, 1, 400)
                     END as snippet,
-                    s.content
+                    s.content,
+                    f.file_path
                 FROM sections s
                 JOIN filings f ON s.filing_id = f.id
                 WHERE s.content ILIKE ?
@@ -140,11 +141,17 @@ class TenKSearchTool(Tool):
                 snippet = re.sub(r'\s+', ' ', snippet).strip()
                 result_dict['snippet'] = snippet
                 
+                # Keep file_path for citation linking
+                file_path = result_dict.get('file_path', '')
+                
                 # Remove full content from output (too large)
                 result_dict.pop('content', None)
                 
                 # Create citation format
                 result_dict['citation'] = f"TenK://{result_dict['ticker']}/{result_dict['fiscal_year']}/{result_dict['section_name']}"
+                
+                # Add file_path back for citation linking
+                result_dict['file_path'] = file_path
                 
                 formatted_results.append(result_dict)
             
