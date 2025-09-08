@@ -1,3 +1,7 @@
+# large local databases
+*.duckdb
+*.sqlite*
+hl-old/10k_knowledge_base.db
 *.npy
 *.duckdb
 *.sqlite
